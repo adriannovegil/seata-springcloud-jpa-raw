@@ -1,0 +1,332 @@
+version: '3.3'
+services:
+
+  # InspectIT
+  # ============================================================================
+  # Agent
+  agent:
+    build: ./docker/agent
+    image: inspectit/inspectit-agent
+    container_name: inspectit-agent
+    volumes:
+      - agent-vol:/agent
+
+  # Config server
+  ocelot-config-server:
+    image: inspectit/inspectit-ocelot-configurationserver:${INSPECTIT_OCELOT_VERSION}
+    container_name: ocelot-config-server
+    environment:
+      - INSPECTIT_CONFIG_SERVER_WORKING_DIRECTORY=/configuration-server
+      - INSPECTIT_CONFIG_SERVER_DEFAULT_USER_PASSWORD=demo
+    volumes:
+      - ./docker/configuration-server:/configuration-server
+    ports:
+      - 8090:8090
+
+  # Infrastructure
+  # ==========================================================================
+  # Discovery service
+  discovery-server:
+    image: seata-springcloud-jpa/discovery-server-raw
+    container_name: discovery-server
+    environment:
+      - INSPECTIT_SERVICE_NAME=discovery-server
+      - INSPECTIT_CONFIG_HTTP_URL=http://ocelot-config-server:8090/api/v1/agent/configuration
+      - INSPECTIT_EXPORTERS_METRICS_PROMETHEUS_ENABLED=false
+      - INSPECTIT_EXPORTERS_METRICS_INFLUX_URL=http://influxdb-server:8086
+      - INSPECTIT_EXPORTERS_TRACING_ZIPKIN_URL=http://zipkin-server:9411/api/v2/spans
+    depends_on:
+      - ocelot-config-server
+      - agent
+      - influxdb-server
+      - zipkin-server
+    entrypoint: ["sh", "-c","
+      ./dockerize -wait=tcp://ocelot-config-server:8090 \
+                  -wait=tcp://influxdb-server:8086 \
+                  -wait=tcp://zipkin-server:9411 \
+                  -timeout=300s -- &&
+      java -XX:+UnlockExperimentalVMOptions -XX:+UseCGroupMemoryLimitForHeap -Djava.security.egd=file:/dev/./urandom
+      -javaagent:/agent/inspectit-ocelot-agent.jar
+      -jar /app.jar"]
+    volumes:
+      - agent-vol:/agent
+    ports:
+      - 8761:8761
+
+  # Databases
+  # ==========================================================================
+  # The official MySQL (https://hub.docker.com/_/mysql/) supports only one
+  # MYSQL_DATABASE environment variable.
+  # By modifying the entrypoint and passing shell script, you can create multiple
+  # dbs without having to make a mysql image just for this purpose.
+  #
+  # Account Data Base
+  account-service-db:
+    image: mysql:5.7
+    container_name: seata-account-service-db
+    environment:
+      - MYSQL_USER=root
+      - MYSQL_ROOT_PASSWORD=123456
+    volumes:
+      - ./account-service/db:/docker-entrypoint-initdb.d
+    entrypoint:
+      sh -c "/usr/local/bin/docker-entrypoint.sh --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci"
+    ports:
+      - 3306:3306
+
+  # Account Data Base Exporter
+  account-service-db-exporter:
+    image: "prom/mysqld-exporter"
+    container_name: seata-account-service-db-exporter
+    environment:
+      - DATA_SOURCE_NAME=root:123456@(account-service-db:3306)/
+    depends_on:
+      - account-service-db    
+    ports:
+      - "9104:9104"
+
+  # Order Data Base
+  order-service-db:
+    image: mysql:5.7
+    container_name: seata-order-service-db
+    environment:
+      - MYSQL_USER=root
+      - MYSQL_ROOT_PASSWORD=123456
+    volumes:
+      - ./order-service/db:/docker-entrypoint-initdb.d
+    entrypoint:
+      sh -c "/usr/local/bin/docker-entrypoint.sh --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci"
+    ports:
+      - 3308:3306
+
+  # Order Data Base Exporter
+  order-service-db-exporter:
+    image: "prom/mysqld-exporter"
+    container_name: seata-order-service-db-exporter
+    environment:
+      - DATA_SOURCE_NAME=root:123456@(order-service-db:3306)/
+    depends_on:
+      - order-service-db    
+    ports:
+      - "9105:9104"
+
+  # Storage Data Base
+  storage-service-db:
+    image: mysql:5.7
+    container_name: seata-storage-service-db
+    environment:
+      - MYSQL_USER=root
+      - MYSQL_ROOT_PASSWORD=123456
+    volumes:
+      - ./storage-service/db:/docker-entrypoint-initdb.d
+    entrypoint:
+      sh -c "/usr/local/bin/docker-entrypoint.sh --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci"
+    ports:
+      - 3307:3306
+
+  # Storage Data Base Exporter
+  storage-service-db-exporter:
+    image: "prom/mysqld-exporter"
+    container_name: seata-storage-service-db-exporter
+    environment:
+    - DATA_SOURCE_NAME=root:123456@(storage-service-db:3306)/
+    depends_on:
+      - storage-service-db    
+    ports:
+      - "9106:9104"
+
+  # Services
+  # ==========================================================================
+  # Account service
+  account-service:
+    image: seata-springcloud-jpa/account-service-raw
+    container_name: seata-account-service
+    environment:
+      - INSPECTIT_SERVICE_NAME=account-service
+      - INSPECTIT_CONFIG_HTTP_URL=http://ocelot-config-server:8090/api/v1/agent/configuration
+      - INSPECTIT_EXPORTERS_METRICS_PROMETHEUS_ENABLED=false
+      - INSPECTIT_EXPORTERS_METRICS_INFLUX_URL=http://influxdb-server:8086
+      - INSPECTIT_EXPORTERS_TRACING_ZIPKIN_URL=http://zipkin-server:9411/api/v2/spans
+    depends_on:
+      - ocelot-config-server
+      - discovery-server
+      - agent
+      - influxdb-server
+      - zipkin-server
+      - account-service-db
+    entrypoint: ["sh", "-c","
+      ./dockerize -wait=tcp://ocelot-config-server:8090 \
+                  -wait=tcp://influxdb-server:8086 \
+                  -wait=tcp://zipkin-server:9411 \
+                  -wait=tcp://account-service-db:3306 \
+                  -wait=tcp://discovery-server:8761 \
+                  -timeout=300s -- &&
+      java -XX:+UnlockExperimentalVMOptions -XX:+UseCGroupMemoryLimitForHeap -Djava.security.egd=file:/dev/./urandom
+      -javaagent:/agent/inspectit-ocelot-agent.jar
+      -jar /app.jar"]
+    volumes:
+      - agent-vol:/agent
+    ports:
+      - 8083:8083
+
+  # Business service
+  business-service:
+    image: seata-springcloud-jpa/business-service-raw
+    container_name: seata-business-service
+    environment:
+      - INSPECTIT_SERVICE_NAME=business-service
+      - INSPECTIT_CONFIG_HTTP_URL=http://ocelot-config-server:8090/api/v1/agent/configuration
+      - INSPECTIT_EXPORTERS_METRICS_PROMETHEUS_ENABLED=false
+      - INSPECTIT_EXPORTERS_METRICS_INFLUX_URL=http://influxdb-server:8086
+      - INSPECTIT_EXPORTERS_TRACING_ZIPKIN_URL=http://zipkin-server:9411/api/v2/spans
+    depends_on:
+      - ocelot-config-server
+      - discovery-server
+      - agent
+      - influxdb-server
+      - zipkin-server
+    entrypoint: ["sh", "-c","
+      ./dockerize -wait=tcp://ocelot-config-server:8090 \
+                  -wait=tcp://influxdb-server:8086 \
+                  -wait=tcp://zipkin-server:9411 \
+                  -wait=tcp://discovery-server:8761 \
+                  -timeout=300s -- &&
+      java -XX:+UnlockExperimentalVMOptions -XX:+UseCGroupMemoryLimitForHeap -Djava.security.egd=file:/dev/./urandom
+      -javaagent:/agent/inspectit-ocelot-agent.jar
+      -jar /app.jar"]
+    volumes:
+      - agent-vol:/agent
+    ports:
+      - 8084:8084
+
+  # Order service
+  order-service:
+    image: seata-springcloud-jpa/order-service-raw
+    container_name: seata-order-service
+    environment:
+      - INSPECTIT_SERVICE_NAME=order-service
+      - INSPECTIT_CONFIG_HTTP_URL=http://ocelot-config-server:8090/api/v1/agent/configuration
+      - INSPECTIT_EXPORTERS_METRICS_PROMETHEUS_ENABLED=false
+      - INSPECTIT_EXPORTERS_METRICS_INFLUX_URL=http://influxdb-server:8086
+      - INSPECTIT_EXPORTERS_TRACING_ZIPKIN_URL=http://zipkin-server:9411/api/v2/spans
+    depends_on:
+      - ocelot-config-server
+      - discovery-server
+      - agent
+      - influxdb-server
+      - zipkin-server
+      - order-service-db
+    entrypoint: ["sh", "-c","
+      ./dockerize -wait=tcp://ocelot-config-server:8090 \
+                  -wait=tcp://influxdb-server:8086 \
+                  -wait=tcp://zipkin-server:9411 \
+                  -wait=tcp://order-service-db:3306 \
+                  -wait=tcp://discovery-server:8761 \
+                  -timeout=300s -- &&
+      java -XX:+UnlockExperimentalVMOptions -XX:+UseCGroupMemoryLimitForHeap -Djava.security.egd=file:/dev/./urandom
+      -javaagent:/agent/inspectit-ocelot-agent.jar
+      -jar /app.jar"]
+    volumes:
+      - agent-vol:/agent
+    ports:
+      - 8082:8082
+
+  # Storage service
+  storage-service:
+    image: seata-springcloud-jpa/storage-service-raw
+    container_name: seata-storage-service
+    environment:
+      - INSPECTIT_SERVICE_NAME=storage-service
+      - INSPECTIT_CONFIG_HTTP_URL=http://ocelot-config-server:8090/api/v1/agent/configuration
+      - INSPECTIT_EXPORTERS_METRICS_PROMETHEUS_ENABLED=false
+      - INSPECTIT_EXPORTERS_METRICS_INFLUX_URL=http://influxdb-server:8086
+      - INSPECTIT_EXPORTERS_TRACING_ZIPKIN_URL=http://zipkin-server:9411/api/v2/spans
+    depends_on:
+      - ocelot-config-server
+      - discovery-server
+      - agent
+      - influxdb-server
+      - zipkin-server
+      - storage-service-db
+    entrypoint: ["sh", "-c","
+      ./dockerize -wait=tcp://ocelot-config-server:8090 \
+                  -wait=tcp://influxdb-server:8086 \
+                  -wait=tcp://zipkin-server:9411 \
+                  -wait=tcp://storage-service-db:3306 \
+                  -wait=tcp://discovery-server:8761 \
+                  -timeout=300s -- &&
+      java -XX:+UnlockExperimentalVMOptions -XX:+UseCGroupMemoryLimitForHeap -Djava.security.egd=file:/dev/./urandom
+      -javaagent:/agent/inspectit-ocelot-agent.jar
+      -jar /app.jar"]
+    volumes:
+      - agent-vol:/agent
+    ports:
+      - 8081:8081
+
+  # Metrics
+  # ============================================================================
+  # InfluxDB
+  influxdb-server:
+    image: influxdb:1.7.1
+    container_name: inspectit-influxdb-server
+    environment:
+      - INFLUXDB_HTTP_FLUX_ENABLED=true
+      - INFLUXDB_HTTP_LOG_ENABLED=false
+      - INFLUXDB_DATA_QUERY_LOG_ENABLED=false
+    volumes:
+      - ./docker/influxdb-server:/docker-entrypoint-initdb.d
+    ports:
+      - 8086:8086
+
+  # Prometheus
+  prometheus-server:
+    image: prom/prometheus:v2.9.2
+    container_name: prometheus
+    depends_on:
+      - account-service-db-exporter
+      - order-service-db-exporter
+      - storage-service-db-exporter
+    volumes:
+      - ./docker/prometheus-server/prometheus.yml:/etc/prometheus/prometheus.yml
+    ports:
+      - 9090:9090
+
+  # Grafana
+  grafana-server:
+    build: ./docker/grafana-server
+    image: inspectit/inspectit-grafana-server
+    container_name: inspectit-grafana-server
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=demo
+      - GF_PATHS_PROVISIONING=/usr/share/grafana/custom/
+    volumes:
+      - ./docker/grafana-server/provisioning:/usr/share/grafana/custom/
+    depends_on:
+      - influxdb-server
+    ports:
+      - 3000:3000
+
+  # Trazing
+  # ============================================================================
+  # Zipkin
+  zipkin-server:
+    image: openzipkin/zipkin
+    container_name: inspectit-zipkin-server
+    ports:
+      - 9411:9411
+
+  # Load
+  # ============================================================================
+  # Load server
+  load-server:
+    build: ./docker/load-server
+    image: seata-springcloud-jpa/load-server
+    container_name: seata-load-server
+    depends_on:
+      - account-service
+      - business-service
+      - order-service
+      - storage-service
+
+volumes:
+  agent-vol:

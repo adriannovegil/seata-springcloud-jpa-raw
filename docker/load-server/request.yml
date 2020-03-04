@@ -1,0 +1,10 @@
+config:
+  target: 'http://business-service:8084'
+  phases:
+    - duration: 5
+      arrivalCount: 5
+scenarios:
+  - flow:
+    - loop:      
+      - get:
+          url: "/purchase/commit" 
